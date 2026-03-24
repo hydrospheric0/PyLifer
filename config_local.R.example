@@ -1,0 +1,8 @@
+# API keys config — copy this file to config_local.R and fill in your own keys.
+# config_local.R is gitignored and will never be committed.
+#
+# eBird Status & Trends key:  https://ebird.org/st/request
+# eBird API key:              https://ebird.org/api/keygen
+
+ebirdst_key   <- "YOUR_EBIRDST_KEY_HERE"   # eBird Status & Trends download key
+ebird_api_key <- "YOUR_EBIRD_API_KEY_HERE" # eBird API key (used by rebird functions)

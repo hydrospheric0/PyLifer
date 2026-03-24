@@ -1,0 +1,24 @@
+# API keys — never commit these
+config_local.R
+
+# eBird data cache (large raster files)
+data/ebirdst/
+
+# Output directories
+results_py/
+
+# User eBird data export
+MyEBirdData.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store

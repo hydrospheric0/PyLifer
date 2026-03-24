@@ -1,0 +1,9 @@
+ebird-api>=4.0.0
+geopandas>=1.0.0
+imageio>=2.0.0
+matplotlib>=3.8.0
+numpy>=2.0.0
+rasterio>=1.4.0
+requests>=2.32.0
+shapely>=2.0.0
+tqdm>=4.0.0
