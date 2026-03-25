@@ -204,18 +204,20 @@ def download_one(
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = tif_url(species_code, resolution, ebirdst_key)
 
+    tmp = dest.with_suffix(".tmp")
     try:
         with requests.get(url, timeout=600, stream=True) as r:
             if r.status_code == 404:
                 return "missing", species_code, resolution
             r.raise_for_status()
-            tmp = dest.with_suffix(".tmp")
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(chunk_size=256 * 1024):
                     f.write(chunk)
             tmp.rename(dest)
         return "downloaded", species_code, resolution
     except Exception as exc:
+        if tmp.exists():
+            tmp.unlink()
         return f"error:{exc}", species_code, resolution
 
 
@@ -379,7 +381,19 @@ def main() -> None:
                 msg = f"  [{status}] {sp}  {res}"
                 errors.append(msg)
                 if not _HAS_TQDM:
-                    print(msg)
+                    print(f"\n{msg}")
+            if not _HAS_TQDM:
+                done = sum(counters.values())
+                print(
+                    f"\r  [{done}/{len(jobs)}]  "
+                    f"ok={counters['downloaded']}  "
+                    f"cached={counters['cached']}  "
+                    f"err={counters['error']}  ",
+                    end="", flush=True,
+                )
+
+    if not _HAS_TQDM:
+        print()  # newline after progress
 
     print(
         f"\nDone.\n"

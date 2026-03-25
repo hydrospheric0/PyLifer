@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-map_lifers.py — Generate weekly lifer maps and animated GIF from cached
+map_lifers.py — Generate weekly lifer maps and animated GIFs from cached
 eBird Status & Trends rasters.  Output goes to results_py/
 
-Single-week test:
-    .venv/bin/python map_lifers.py --week 20
+Default (all regions, all resolutions, full animation):
+    .venv/bin/python map_lifers.py
 
-Full 52-week animation (NL + US, 3km):
-    .venv/bin/python map_lifers.py --animate
+Single region / resolution:
+    .venv/bin/python map_lifers.py --regions NL --resolutions 27km
+
+Single-week preview:
+    .venv/bin/python map_lifers.py --regions NL --resolutions 27km --week 20
 
 Options:
-    --regions NL US     eBird region codes
-    --resolution 3km    3km | 9km | 27km
-    --week N            single map for week N (1-52)
-    --animate           all 52 frames + GIF
-    --ram-gb 4.0        RAM budget per batch in GB (default 4)
-    --fps 5             GIF frames per second (default 5)
+    --regions NL US         eBird region codes (default: NL US)
+    --resolutions 27km 9km  one or more of 3km 9km 27km (default: all three)
+    --week N                single map for week N; skips animation
+    --no-animate            render week 20 only, no GIF
+    --ram-gb 4.0            RAM budget per batch in GB (default 4)
+    --fps 5                 GIF frames per second (default 5)
+    --offline               skip API calls, use locally cached tifs
 """
 
 import argparse
@@ -36,6 +40,8 @@ from rasterio.features import geometry_mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.windows import from_bounds, Window
 from rasterio.transform import array_bounds
+import matplotlib
+matplotlib.use("Agg")   # non-interactive backend — prevents Tkinter threading errors
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import requests
@@ -84,14 +90,86 @@ def load_config(path: Path = Path(".env")) -> dict:
 
 def load_ebirdst_runs(path: Path = Path("ebirdst_runs.csv")) -> dict:
     if not path.exists():
-        sys.exit("ebirdst_runs.csv not found — run:  Rscript export_ebirdst_runs.R")
-    return {row["species_code"]: row["common_name"]
-            for row in csv.DictReader(open(path))}
+        sys.exit("ebirdst_runs.csv not found — see README for download link.")
+    with open(path) as f:
+        return {row["species_code"]: row["common_name"]
+                for row in csv.DictReader(f)}
 
 
 # ---------------------------------------------------------------------------
 # eBird API helpers
 # ---------------------------------------------------------------------------
+def _tif_url(species_code: str, resolution: str, ebirdst_key: str) -> str:
+    import urllib.parse
+    obj_key = (
+        f"{EBIRDST_VERSION}/{species_code}/weekly/"
+        f"{species_code}_occurrence_median_{resolution}_{EBIRDST_VERSION}.tif"
+    )
+    return (
+        "https://st-download.ebird.org/v1/fetch"
+        f"?objKey={urllib.parse.quote(obj_key, safe='/')}"
+        f"&key={ebirdst_key}"
+    )
+
+
+def download_missing(
+    needed: set[str],
+    resolution: str,
+    ebirdst_key: str,
+    workers: int = 4,
+) -> None:
+    """Download any tifs in `needed` that are not yet cached.  Prompts before starting."""
+    missing = [sp for sp in sorted(needed) if not tif_path(sp, resolution).exists()]
+    if not missing:
+        return
+
+    print(f"  {len(missing)} tifs not yet cached at {resolution}.")
+    try:
+        answer = input(f"  Download now? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        sys.exit(0)
+    if answer != "y":
+        print("  Skipping download — some species may be missing from the map.")
+        return
+
+    def _fetch_one(sp: str) -> tuple[str, str]:
+        dest = tif_path(sp, resolution)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        url = _tif_url(sp, resolution, ebirdst_key)
+        try:
+            with requests.get(url, timeout=600, stream=True) as r:
+                if r.status_code == 404:
+                    return "missing", sp
+                r.raise_for_status()
+                tmp = dest.with_suffix(".tmp")
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=256 * 1024):
+                        f.write(chunk)
+                tmp.rename(dest)
+            return "ok", sp
+        except Exception as exc:
+            return f"error:{exc}", sp
+
+    ok = err = skip = 0
+    total = len(missing)
+    print(f"  Downloading {total} files ({workers} threads) …")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for status, sp in pool.map(_fetch_one, missing):
+            done = ok + err + skip
+            if status == "ok":
+                ok += 1
+            elif status == "missing":
+                skip += 1
+            else:
+                err += 1
+                print(f"\n    [warn] {sp}: {status}")
+            done += 1
+            print(f"\r  [{done}/{total}]  ok={ok}  skip={skip}  err={err}  ", end="", flush=True)
+    print()  # newline after progress
+    print(f"  Download complete — {ok} downloaded, {skip} not in S&T, {err} errors.")
+
+
 def get_taxonomy(api_key: str) -> dict:
     return {r["comName"]: r["speciesCode"] for r in _ebird_taxonomy(api_key)}
 
@@ -151,7 +229,18 @@ def get_nl_boundary() -> gpd.GeoDataFrame:
     )
     world = gpd.read_file(shp)
     col = "ISO_A3" if "ISO_A3" in world.columns else "sov_a3"
-    return world[world[col] == "NLD"].to_crs("EPSG:4326").copy()
+    nl = world[world[col] == "NLD"].to_crs("EPSG:4326").copy()
+    # NaturalEarth "NLD" is a multipolygon that includes Caribbean overseas territories
+    # (Aruba, Curaçao, Bonaire etc.).  Explode and keep only European parts.
+    nl_exp = nl.explode(index_parts=True)
+    nl_proj = nl_exp.to_crs("EPSG:4087")   # World Equidistant Cylindrical — safe for centroid
+    nl_exp = nl_exp[
+        (nl_proj.geometry.centroid.x > -1_000_000) &   # east of ~9°W
+        (nl_proj.geometry.centroid.y >  4_500_000)     # north of ~40°N
+    ]
+    if nl_exp.empty:
+        sys.exit("Could not isolate European part of Netherlands from NaturalEarth data.")
+    return nl_exp.dissolve().to_crs("EPSG:4326")
 
 
 def get_us_boundary(state_code: str | None = None) -> gpd.GeoDataFrame:
@@ -342,27 +431,24 @@ def _raster_extent(transform, h: int, w: int) -> tuple:
     return xmin, xmax, ymin, ymax
 
 
-def _fig_geometry(data: np.ndarray, transform) -> tuple:
-    """Layout constants for make_map (figure geometry from raster shape/transform)."""
-    h, w = data.shape
-    xmin, xmax, ymin, ymax = _raster_extent(transform, h, w)
-    pad_in    = 0.15                          # uniform margin, all four sides (inches)
+def _fig_geometry(transform, boundary_local: gpd.GeoDataFrame) -> tuple:
+    """Layout constants for make_map.  Aspect ratio driven by boundary bounds."""
+    bx_min, by_min, bx_max, by_max = boundary_local.total_bounds
+    pad_in    = 0.15
     fig_w     = 6.6
-    cw_in     = fig_w - 2.0 * pad_in         # content width for the map (6.3 in)
-    data_aspect = (xmax - xmin) / (ymax - ymin)
-    map_h_in   = cw_in / data_aspect          # map height: data fills the padded width
-    header_in  = 0.66                         # header band: top-margin + two rows + row-gap
-    cap_in     = 1.05                         # caption band: sep + text + bottom-margin
+    cw_in     = fig_w - 2.0 * pad_in
+    data_aspect = (bx_max - bx_min) / (by_max - by_min)
+    map_h_in   = cw_in / data_aspect
+    header_in  = 0.66
+    cap_in     = 1.05
     fig_h      = map_h_in + header_in + cap_in
     cap_frac   = cap_in   / fig_h
     map_frac   = map_h_in / fig_h
     hdr_bot    = cap_frac + map_frac
-    pad_h      = pad_in / fig_w               # normalized horizontal pad
-    pad_v      = pad_in / fig_h               # normalized vertical pad
-    cb_h_n     = 0.053 / fig_h               # colorbar bar height (normalized)
-    # Row 2 (date + colorbar): pad_in above map top
+    pad_h      = pad_in / fig_w
+    pad_v      = pad_in / fig_h
+    cb_h_n     = 0.053 / fig_h
     cb_y       = hdr_bot + pad_v
-    # Row 1 (title + legend label): pad_in below figure top
     y_r1       = 1.0 - pad_v
     return fig_w, fig_h, cap_in, cap_frac, map_frac, hdr_bot, pad_h, pad_v, cb_h_n, cb_y, y_r1
 
@@ -379,15 +465,16 @@ def make_map(
     username: str = "unknown",
 ) -> None:
     fig_w, fig_h, cap_in, cap_frac, map_frac, hdr_bot, pad_h, pad_v, cb_h_n, cb_y, y_r1 = \
-        _fig_geometry(data, transform)
+        _fig_geometry(transform, boundary_local)
     h, w = data.shape
     xmin, xmax, ymin, ymax = _raster_extent(transform, h, w)
+    # Use boundary bounds for axis limits so small regions fill the canvas.
+    bx_min, by_min, bx_max, by_max = boundary_local.total_bounds
 
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor=BG_COLOR)
     # Map axes: pad_in on each side so the map content has uniform side margins
     ax  = fig.add_axes([pad_h, cap_frac, 1.0 - 2*pad_h, map_frac])
     ax.set_facecolor(BG_COLOR)
-    ax.set_aspect("equal")
     ax.axis("off")
 
     # turbo colormap, blue (low) → red (high), linear scale.
@@ -399,8 +486,8 @@ def make_map(
 
     boundary_local.boundary.plot(ax=ax, color=FG_LIGHT, alpha=0.3, linewidth=0.5)
     ax.set_aspect("equal")   # re-assert after geopandas (which resets it)
-    ax.set_xlim(xmin, xmax)
-    ax.set_ylim(ymin, ymax)
+    ax.set_xlim(bx_min, bx_max)
+    ax.set_ylim(by_min, by_max)
 
     # Title (row 1, left — white) — pad_in from figure top
     fig.text(pad_h, y_r1, "Lifer finder: mapping the birds you've yet to meet",
@@ -413,7 +500,10 @@ def make_map(
     # Colorbar (row 2, right) — right edge inset by 3× pad so last tick label fits
     step = 5
     tick_pos = list(range(0, vmax_binned, step))
-    if not tick_pos or tick_pos[-1] != vmax_binned:
+    # If the nearest step tick is too close to vmax, replace it rather than appending
+    if tick_pos and (vmax_binned - tick_pos[-1]) < step:
+        tick_pos[-1] = vmax_binned
+    elif not tick_pos or tick_pos[-1] != vmax_binned:
         tick_pos.append(vmax_binned)
     tick_labels = [str(t) for t in tick_pos[:-1]] + [f"{tick_pos[-1]} sp."]
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -479,10 +569,11 @@ def make_gif_lores(frame_dir: Path, gif_path: Path, fps: int = 5, scale: float =
     new_h = round(first.height * scale)
     first.close()
 
-    frames = [
-        Image.open(p).convert("RGB").resize((new_w, new_h), Image.LANCZOS)
-        for p in jpgs
-    ]
+    frames = []
+    for p in jpgs:
+        src = Image.open(p)
+        frames.append(src.convert("RGB").resize((new_w, new_h), Image.LANCZOS))
+        src.close()
 
     sample = frames[::4]
     combined = Image.new("RGB", (new_w, new_h * len(sample)))
@@ -520,7 +611,11 @@ def make_gif(frame_dir: Path, gif_path: Path, fps: int = 5) -> None:
         print("  [warn] no frames found for GIF")
         return
 
-    frames = [Image.open(p).convert("RGB") for p in jpgs]
+    frames = []
+    for p in jpgs:
+        src = Image.open(p)
+        frames.append(src.convert("RGB"))
+        src.close()
 
     # ------------------------------------------------------------------ #
     # Build a global 256-colour palette from a representative sample of
@@ -586,15 +681,24 @@ def _lap(label: str, t0: float) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--regions",    nargs="+", default=["NL", "US"], metavar="CODE")
-    parser.add_argument("--resolution", default="3km", choices=["3km", "9km", "27km"])
+    parser.add_argument("--regions",     nargs="+", default=["NL", "US"], metavar="CODE")
+    parser.add_argument("--resolutions", nargs="+", default=["3km", "9km", "27km"],
+                        choices=["3km", "9km", "27km"], metavar="RES",
+                        help="Resolutions to process (default: all three).")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--week",    type=int, metavar="N",
-                      help="Single map for week N (1-52). Default 20.")
-    mode.add_argument("--animate", action="store_true",
-                      help="All 52 frames + animated GIF.")
+    mode.add_argument("--week",       type=int, metavar="N", choices=range(1, 53),
+                      help="Single map for week N (1-52).")
+    mode.add_argument("--animate",    action="store_true",
+                      help="All 52 frames + animated GIF (default; explicit flag accepted for compatibility).")
+    mode.add_argument("--no-animate", action="store_true",
+                      help="Skip animation; render week 20 only.")
     parser.add_argument("--fps",    type=int,   default=5,   help="GIF fps.")
     parser.add_argument("--ram-gb", type=float, default=4.0, help="RAM budget per batch (GB).")
+    parser.add_argument(
+        "--color-scale", choices=["fixed", "custom"], default="fixed",
+        help="'fixed' = vmax 35 (default, comparable across runs); "
+             "'custom' = vmax set to actual data max for maximum contrast.",
+    )
     parser.add_argument("--ebird-csv", default="MyEBirdData.csv", metavar="PATH")
     parser.add_argument(
         "--offline", action="store_true",
@@ -603,8 +707,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not args.animate and args.week is None:
-        args.week = 20
+    # Default mode is full animation; --no-animate or --week override
+    animate = not args.no_animate and args.week is None
+    single_week = args.week if args.week is not None else (None if animate else 20)
 
     t_wall = time.perf_counter()
 
@@ -624,94 +729,115 @@ def main() -> None:
         t = _lap("taxonomy", t)
 
     for region in args.regions:
-        print(f"\n{'─'*60}")
-        print(f"Region: {region}  |  resolution: {args.resolution}")
-        t = time.perf_counter()
+        print(f"\n{'═'*60}")
+        print(f"Region: {region}")
+        t_region = time.perf_counter()
 
+        # ------------------------------------------------------------------
+        # Build needed species once per region (shared across resolutions)
+        # ------------------------------------------------------------------
         if args.offline:
-            # Use every modeled species that has a tif at the requested resolution
-            needed = {
-                c for c in modeled
-                if c not in EXCLUDED_CODES
-                and tif_path(c, args.resolution).exists()
-            }
-            print(f"  [offline] {len(needed)} species with local {args.resolution} tifs")
-            t = _lap("species selection (offline)", t)
+            regional = None
+            user_seen = set()
         else:
             print("  Fetching eBird checklist …")
+            t = time.perf_counter()
             regional  = ebird_regional_species(region, api_key)
             t = _lap("checklist fetch", t)
             user_seen = user_seen_codes(Path(args.ebird_csv), region, name_to_code)
-            needed    = (regional - user_seen) & set(modeled) - EXCLUDED_CODES
+            needed_base = (regional - user_seen) & set(modeled) - EXCLUDED_CODES
             print(f"  Checklist: {len(regional)}, seen: {len(user_seen)}, "
-                  f"needed+modeled: {len(needed)}")
+                  f"needed+modeled: {len(needed_base)}")
             t = _lap("user-list diff", t)
 
         boundary   = get_boundary(region)
         target_crs = _target_crs(region)
-        t = _lap("boundary load", t)
 
-        # ------------------------------------------------------------------
-        # Always accumulate all 52 weeks — required for a global vmax that
-        # is consistent across every frame (both --animate and --week modes).
-        # ------------------------------------------------------------------
-        stack, tf_src, crs_src, week_dates = accumulate_all_weeks(
-            needed, boundary, args.resolution, args.ram_gb,
-        )
-        global_max  = float(np.nanmax(stack))
-        vmax_binned = 35
-        print(f"  Global max: {global_max:.0f}  →  vmax: {vmax_binned}")
-        t = _lap("raster accumulation", t)
+        for resolution in args.resolutions:
+            print(f"\n{'─'*60}")
+            print(f"  Resolution: {resolution}")
+            t = time.perf_counter()
 
-        print(f"  Reprojecting 52 layers to {target_crs} …")
-        stack_local, tf_local = reproject_stack(stack, tf_src, crs_src, target_crs)
-        del stack
-        boundary_local = boundary.to_crs(target_crs)
-        t = _lap("reprojection", t)
+            if args.offline:
+                needed = {
+                    c for c in modeled
+                    if c not in EXCLUDED_CODES
+                    and tif_path(c, resolution).exists()
+                }
+                print(f"  [offline] {len(needed)} species with local {resolution} tifs")
+                t = _lap("species selection (offline)", t)
+            else:
+                needed = needed_base
+                download_missing(needed, resolution, config["ebirdst_key"])
+                t = _lap("download check", t)
 
-        if args.animate:
-            weekly_dir = OUT_DIR / region / args.resolution / "Weekly_maps"
+            t = _lap("boundary load", t)
 
-            n_new = 0
-            for i, wd in enumerate(week_dates):
-                out_path = weekly_dir / f"{region}_{wd}.jpg"
-                if out_path.exists():
-                    continue
-                make_map(stack_local[i], tf_local, boundary_local,
-                         week_date=wd, region=region, resolution=args.resolution,
-                         out_path=out_path, vmax_binned=vmax_binned,
-                         username=username)
-                n_new += 1
-                if n_new % 10 == 0:
-                    print(f"    {n_new} frames saved …")
-            print(f"  {n_new} new frames saved." if n_new else "  All frames already exist.")
-            del stack_local
-            t = _lap("frame rendering", t)
+            # ------------------------------------------------------------------
+            # Always accumulate all 52 weeks — required for a global vmax that
+            # is consistent across every frame (both animate and single-week modes).
+            # ------------------------------------------------------------------
+            stack, tf_src, crs_src, week_dates = accumulate_all_weeks(
+                needed, boundary, resolution, args.ram_gb,
+            )
+            global_max  = float(np.nanmax(stack))
+            vmax_binned = max(10, int(global_max)) if args.color_scale == "custom" else 35
+            print(f"  Global max: {global_max:.0f}  →  vmax: {vmax_binned}")
+            t = _lap("raster accumulation", t)
 
-            gif_path = (OUT_DIR / region / args.resolution / "Animated_map"
-                        / f"{region}_{args.resolution}_animated.gif")
-            gif_lores_path = (OUT_DIR / region / args.resolution / "Animated_map"
-                              / f"{region}_{args.resolution}_animated_lores.gif")
-            print("  Assembling GIF …")
-            make_gif(weekly_dir, gif_path, fps=args.fps)
-            t = _lap("GIF assembly", t)
+            print(f"  Reprojecting 52 layers to {target_crs} …")
+            stack_local, tf_local = reproject_stack(stack, tf_src, crs_src, target_crs)
+            del stack
+            boundary_local = boundary.to_crs(target_crs)
+            t = _lap("reprojection", t)
 
-            print("  Assembling lo-res GIF (38%) …")
-            make_gif_lores(weekly_dir, gif_lores_path, fps=args.fps)
-            t = _lap("lo-res GIF assembly", t)
+            cust_suffix = "_cust" if args.color_scale == "custom" else ""
 
-        else:
-            # Single-week preview — vmax still derived from the full time series
-            week_idx  = args.week - 1
-            week_date = week_dates[week_idx] if week_idx < len(week_dates) else f"week{args.week}"
-            out_path  = OUT_DIR / f"{region}_{args.resolution}_week{args.week:02d}.jpg"
-            make_map(stack_local[week_idx], tf_local, boundary_local,
-                     week_date=week_date, region=region,
-                     resolution=args.resolution, out_path=out_path,
-                     vmax_binned=vmax_binned, username=username)
-            del stack_local
-            print(f"  Saved → {out_path}")
-            _lap("map render", t)
+            if animate:
+                weekly_dir = OUT_DIR / region / resolution / f"Weekly_maps{cust_suffix}"
+
+                n_new = 0
+                for i, wd in enumerate(week_dates):
+                    out_path = weekly_dir / f"{region}_{wd}{cust_suffix}.jpg"
+                    if out_path.exists():
+                        continue
+                    make_map(stack_local[i], tf_local, boundary_local,
+                             week_date=wd, region=region, resolution=resolution,
+                             out_path=out_path, vmax_binned=vmax_binned,
+                             username=username)
+                    n_new += 1
+                    if n_new % 10 == 0:
+                        print(f"    {n_new} frames saved …")
+                print(f"  {n_new} new frames saved." if n_new else "  All frames already exist.")
+                del stack_local
+                t = _lap("frame rendering", t)
+
+                gif_path = (OUT_DIR / region / resolution / f"Animated_map{cust_suffix}"
+                            / f"{region}_{resolution}_animated{cust_suffix}.gif")
+                gif_lores_path = (OUT_DIR / region / resolution / f"Animated_map{cust_suffix}"
+                                  / f"{region}_{resolution}_animated_lores{cust_suffix}.gif")
+                print("  Assembling GIF …")
+                make_gif(weekly_dir, gif_path, fps=args.fps)
+                t = _lap("GIF assembly", t)
+
+                print("  Assembling lo-res GIF (38%) …")
+                make_gif_lores(weekly_dir, gif_lores_path, fps=args.fps)
+                t = _lap("lo-res GIF assembly", t)
+
+            else:
+                # Single-week preview
+                week_idx  = single_week - 1
+                if not (0 <= week_idx < len(week_dates)):
+                    sys.exit(f"--week {single_week} out of range (valid: 1-{len(week_dates)})")
+                week_date = week_dates[week_idx]
+                out_path  = OUT_DIR / f"{region}_{resolution}_week{single_week:02d}{cust_suffix}.jpg"
+                make_map(stack_local[week_idx], tf_local, boundary_local,
+                         week_date=week_date, region=region,
+                         resolution=resolution, out_path=out_path,
+                         vmax_binned=vmax_binned, username=username)
+                del stack_local
+                print(f"  Saved → {out_path}")
+                t = _lap("map render", t)
 
     total = time.perf_counter() - t_wall
     print(f"\nDone — output in {OUT_DIR}/  (total {total:.1f}s)")
