@@ -24,6 +24,12 @@ Usage:
     python download_ebirdst.py --needs global           # true lifers (global list)
     python download_ebirdst.py --dry-run                # show counts, no download
     python download_ebirdst.py --workers 8              # more parallel threads
+    python download_ebirdst.py --yes                    # skip confirmation prompt
+
+Config (.env):
+    EBIRDST_KEY=...      eBird S&T download key
+    EBIRD_API_KEY=...    eBird API key
+    USER=...             your name (shown in map titles)
 """
 
 import argparse
@@ -60,28 +66,27 @@ EXCLUDED_CODES    = {"laugul", "rocpig", "compea", "yebsap-example"}
 # ---------------------------------------------------------------------------
 # Config parsing
 # ---------------------------------------------------------------------------
-def load_config(config_path: Path = Path("config_local.R")) -> dict:
-    """Parse ebirdst_key and ebird_api_key from config_local.R."""
+def load_config(config_path: Path = Path(".env")) -> dict:
+    """Parse ebirdst_key and ebird_api_key from .env."""
     import re
     if not config_path.exists():
         sys.exit(
-            f"config_local.R not found at {config_path}.\n"
-            "Copy config_local.R.example to config_local.R and fill in your keys."
+            f".env not found at {config_path}.\n"
+            "Copy .env.example to .env and fill in your keys."
         )
     keys = {}
     for line in config_path.read_text().splitlines():
         line = line.strip()
-        if line.startswith("#") or "<-" not in line:
+        if line.startswith("#") or "=" not in line:
             continue
-        name, _, rhs = line.partition("<-")
+        name, _, rhs = line.partition("=")
         name = name.strip()
-        # Extract the quoted string value, ignoring any trailing R inline comment
-        m = re.search(r'["\']([^"\']+)["\']', rhs)
-        if m and name in ("ebirdst_key", "ebird_api_key"):
-            keys[name] = m.group(1)
+        rhs = rhs.strip().strip('"').strip("'")
+        if name in ("EBIRDST_KEY", "EBIRD_API_KEY"):
+            keys[name.lower()] = rhs
     for required in ("ebirdst_key", "ebird_api_key"):
         if required not in keys or not keys[required] or "YOUR_" in keys[required]:
-            sys.exit(f"Missing or placeholder value for '{required}' in config_local.R")
+            sys.exit(f"Missing or placeholder value for '{required.upper()}' in .env")
     return keys
 
 
@@ -256,6 +261,10 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="Print what would be downloaded without downloading anything.",
     )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the confirmation prompt and proceed immediately.",
+    )
     args = parser.parse_args()
 
     config    = load_config()
@@ -316,6 +325,31 @@ def main() -> None:
                 status = "EXISTS" if dest.exists() else "MISSING"
                 print(f"  [{status}] {sp:20s} {res}  {name}")
         return
+
+    # ------------------------------------------------------------------
+    # Confirmation prompt
+    # ------------------------------------------------------------------
+    already_cached = sum(
+        1 for sp in all_needed for res in args.resolutions
+        if tif_dest(cache_dir, sp, res).exists()
+    )
+    to_download = total_files - already_cached
+    print(f"  Already cached     : {already_cached}")
+    print(f"  To download        : {to_download}")
+
+    if to_download == 0:
+        print("\nNothing to download.")
+        return
+
+    if not args.yes:
+        try:
+            answer = input("\nProceed with download? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(0)
+        if answer != "y":
+            print("Aborted.")
+            sys.exit(0)
 
     # ------------------------------------------------------------------
     # Parallel download

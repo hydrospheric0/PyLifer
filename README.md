@@ -42,10 +42,10 @@ You need two keys:
 Copy the example config and fill in your keys:
 
 ```bash
-cp config_local.R.example config_local.R
+cp .env.example .env
 ```
 
-`config_local.R` is gitignored and will never be committed.
+`.env` is gitignored and will never be committed.
 
 ### 3. Species model list
 
@@ -61,7 +61,7 @@ Export your life list from [ebird.org/downloadMyData](https://ebird.org/download
 ## Workflow
 
 ```
-1. Fill in config_local.R with your API keys
+1. Fill in .env with your API keys
 2. Place MyEBirdData.csv in the project root
 3. Place ebirdst_runs.csv in the project root
 4. python download_ebirdst.py    # download the rasters you need

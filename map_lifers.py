@@ -66,18 +66,19 @@ FG_LIGHT = "white"
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
-def load_config(path: Path = Path("config_local.R")) -> dict:
+def load_config(path: Path = Path(".env")) -> dict:
     if not path.exists():
-        sys.exit("config_local.R not found — copy config_local.R.example and fill in your keys.")
+        sys.exit(".env not found — copy .env.example and fill in your keys.")
     keys = {}
     for line in path.read_text().splitlines():
         line = line.strip()
-        if line.startswith("#") or "<-" not in line:
+        if line.startswith("#") or "=" not in line:
             continue
-        name, _, rhs = line.partition("<-")
-        m = re.search(r'["\']([^"\']+)["\']', rhs)
-        if m:
-            keys[name.strip()] = m.group(1)
+        name, _, rhs = line.partition("=")
+        name = name.strip().lower()
+        rhs = rhs.strip().strip('"').strip("'")
+        if name in ("ebirdst_key", "ebird_api_key", "user"):
+            keys[name] = rhs
     return keys
 
 
