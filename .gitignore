@@ -1,14 +1,16 @@
-# API keys — never commit these
-config_local.R
-
-# eBird data cache (large raster files)
-data/ebirdst/
-
 # Output directories
 results_py/
 
-# User eBird data export
+# Data (large eBird S&T rasters and symlinks)
+data
+data/
+
+# Personal / local files
 MyEBirdData.csv
+config_local.R
+ebirdst_runs.csv
+BENCHMARK_RESULTS.md
+ne_admin1_large.rds
 
 # Python
 __pycache__/
