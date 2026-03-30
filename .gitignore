@@ -1,8 +1,15 @@
 # Pipeline stamp files (local state only)
 .pipeline/
 
+# Benchmark (local only)
+benchmark.sh
+benchmark_logs/
+benchmark_results/
+BENCHMARK_RESULTS.md
+
 # Legacy / archive scripts
 _archive/
+pushit.sh
 
 # Output directories
 results_py/
