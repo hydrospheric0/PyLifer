@@ -1,0 +1,33 @@
+# Pipeline stamp files (local state only)
+.pipeline/
+
+# Output directories
+results_py/
+results_r/
+benchmark_results/
+
+# Data — ship the pre-built hotspot grid cache; ignore large downloaded datasets
+data/ebirdst
+data/naturalearth
+data/ebird_hotspots_us.gpkg
+data/score_cache/
+data/sp_cache/
+
+# Personal / local files
+MyEBirdData.csv
+.env
+ebirdst_runs.csv
+BENCHMARK_RESULTS.md
+ne_admin1_large.rds
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# OS
+.DS_Store
