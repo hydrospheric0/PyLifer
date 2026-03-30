@@ -1,6 +1,9 @@
 # Pipeline stamp files (local state only)
 .pipeline/
 
+# Legacy / archive scripts
+_archive/
+
 # Output directories
 results_py/
 results_r/
@@ -12,8 +15,10 @@ data/naturalearth
 data/ebird_hotspots_us.gpkg
 data/score_cache/
 data/sp_cache/
+user_data/
 
 # Personal / local files
+*.zip
 MyEBirdData.csv
 .env
 ebirdst_runs.csv

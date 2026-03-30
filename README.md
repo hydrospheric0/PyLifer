@@ -1,39 +1,20 @@
 # PyLifer
 
-## About the tool
+**A complete Python rewrite by [Bart Wickel](https://github.com/hydrospheric0)**
 
-PyLifer generates animated personal lifer maps from eBird Status & Trends occurrence data.
-It is a fully Python port of [lifeR](https://github.com/smsfrn/lifeR) — no R required.
+PyLifer is a standalone Python tool for generating animated personal lifer maps from eBird Status & Trends occurrence data. It was inspired by the concept of [lifeR](https://github.com/smsfrn/lifeR) by Sam Safran but shares no code with it — this is a full ground-up Python implementation with a single entry point, RAM-aware parallel processing, and a compact sp_cache for fast re-runs.
 
-For each week of the year, it stacks occurrence rasters for every species you still need, producing weekly heatmaps and a 52-frame animated GIF showing where your best lifer opportunities are.
+For each week of the year it stacks occurrence rasters for every species you still need, producing weekly heatmaps and a 52-frame animated GIF showing where your best lifer opportunities are throughout the year.
 
-## Features
+## How it works
 
-- Downloads eBird S&T rasters in bulk at 27km, 9km, or 3km resolution
-- Accumulates weekly occurrence probability across all needed species
-- Renders weekly heatmaps and assembles a full-year animated GIF
-- Produces a lo-res GIF alongside the full-res version for easy sharing
-- Parallel raster processing with configurable RAM cap
-- Fully offline after initial data download (`--offline` flag)
-- Minimal dependencies — pure Python stack, no R
+Everything runs through a single script — `PyLifer.py` — which chains the full pipeline automatically:
 
-## Directory layout
-
-This repo lives inside the `eBirdST/repos/PyLifer` workspace.
-The `data/` directory is a **symlink** pointing to `../../data` (`eBirdST/data`),
-which is the single shared data store for all eBird S&T rasters, NaturalEarth
-boundaries, hotspot grids, and caches. Do **not** copy data into this directory —
-keep the symlink intact so all sibling tools share the same dataset.
-
-```
-eBirdST/
-├── data/               ← shared data (rasters, caches, boundaries)
-├── repos/
-│   ├── PyLifer/        ← this repo
-│   │   └── data -> ../../data
-│   └── lifeR/
-│       └── data -> ../../data
-```
+1. **Workspace setup** — finds your eBird export zip, extracts `MyEBirdData.csv`
+2. **Model table** — generates `ebirdst_runs.csv` from the S&T API if absent
+3. **Download** — fetches missing species tifs from eBird Status & Trends
+4. **Preprocess** — builds a compact packbits sp_cache (~32× smaller than raw tifs)
+5. **Render** — weekly heatmaps + 52-frame animated GIF
 
 ## Setup
 
@@ -44,6 +25,7 @@ pip install -r requirements.txt
 ```
 
 System libraries required (Ubuntu/Debian):
+
 ```bash
 sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev
 ```
@@ -52,124 +34,53 @@ sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev
 
 You need two keys:
 
-| Key | Purpose | Where to request |
+| Key | Purpose | Where to get it |
 |-----|---------|-----------------|
 | eBird Status & Trends key | Download occurrence rasters | https://ebird.org/st/request |
-| eBird API key | Fetch your regional needs list | https://ebird.org/api/keygen |
+| eBird API key | Fetch your regional checklist | https://ebird.org/api/keygen |
 
-Copy the example config and fill in your keys:
+Create a `.env` file in the project root:
 
-```bash
-cp .env.example .env
+```ini
+EBIRDST_KEY=your_ebirdst_key
+EBIRD_API_KEY=your_ebird_api_key
+USER=Your Name
 ```
 
-`.env` is gitignored and will never be committed.
+### 3. Your eBird data
 
-### 3. Species model list
-
-Both scripts need `ebirdst_runs.csv` — a list of all species that have eBird S&T models.
-Download a pre-built copy from the [releases](https://github.com/hydrospheric0/PyLifer/releases) page, or generate it from the [lifeR repo](https://github.com/smsfrn/lifeR).
-
-Place it in the project root. It is gitignored.
-
-### 4. Your eBird data
-
-Export your life list from [ebird.org/downloadMyData](https://ebird.org/downloadMyData) and save the file as `MyEBirdData.csv` in the project root. It is gitignored.
-
-## Workflow
-
-```
-1. Fill in .env with your API keys
-2. Place MyEBirdData.csv in the project root
-3. Place ebirdst_runs.csv in the project root
-4. python download_ebirdst.py    # download the rasters you need
-5. python map_lifers.py --animate
-```
+Export your life list from [ebird.org/downloadMyData](https://ebird.org/downloadMyData) and drop the downloaded `.zip` file into the project root. PyLifer extracts it automatically on first run.
 
 ## Usage
 
-### Download rasters
-
 ```bash
-# US + NL, all resolutions
-python download_ebirdst.py
-
-# US only, skip 3km
-python download_ebirdst.py --regions US --resolutions 9km 27km
-
-# True global lifers (not just regional needs)
-python download_ebirdst.py --needs global
-
-# Preview counts without downloading
-python download_ebirdst.py --dry-run
+./run.sh                                        # US, all resolutions, full animation
+./run.sh --regions US-CA                        # California only
+./run.sh --regions US NL                        # multiple regions
+./run.sh --week 20                              # single-week preview
+./run.sh --no-animate                           # week 20 only, no GIF
+./run.sh --offline                              # no API calls, use cached tifs
+./run.sh --generate-runs-csv                    # refresh ebirdst_runs.csv and exit
+./run.sh --skip-preprocess                      # skip sp_cache build
+./run.sh --force-preprocess                     # rebuild sp_cache from scratch
+./run.sh --ram-gb 8                             # cap RAM usage
+./run.sh --scale compact                        # colour scale preset (auto/compact/wide)
+./run.sh -y                                     # auto-confirm download prompts
 ```
 
-### Generate maps
+Or call Python directly:
 
 ```bash
-# Single week
-python map_lifers.py --week 20
-
-# Full 52-week animation (hi-res + lo-res GIFs)
-python map_lifers.py --animate
-
-# 3km animation, US only, custom frame rate
-python map_lifers.py --regions US --resolution 3km --animate --fps 5
-
-# Re-render from cached rasters (no API calls)
-python map_lifers.py --animate --offline
+python PyLifer.py --regions US --animate
 ```
 
-Output goes to `results_py/<region>/<resolution>/Weekly_maps/` and `Animated_map/`.
-
-### Find top hotspots (`top_spots.py`)
-
-```bash
-# Top hotspots in NL using default settings (3km, peak metric, top 10)
-python top_spots.py --regions NL
-
-# Compare two regions and rank by median weekly value
-python top_spots.py --regions US US-CA --n 5 --metric median
-
-# Use a coarser grid and return more candidate locations
-python top_spots.py --regions US --resolution 9km --n 20
-```
-
-Key options:
-
-- `--regions CODE [CODE ...]`: region codes (default: `NL US`)
-- `--resolution RES`: `3km`, `9km`, or `27km` (default: `3km`)
-- `--n N`: number of spots returned (default: `10`)
-- `--metric`: `peak`, `median`, or `mean` (default: `peak`)
-- `--min-km`: minimum spacing between returned spots in km (default: `50`)
-- `--offline`: use only locally cached rasters
-
-For US regions, the script can use the local hotspot GeoPackage (`data/ebird_hotspots_us.gpkg`) for named hotspot matches.
-
-## Data
-
-All data is accessed through the `data/` symlink, which points to the shared
-`eBirdST/data` directory. Contents:
-
-| Path | Description |
-|------|-------------|
-| `data/ebirdst/` | eBird S&T GeoTIFF rasters (downloaded via `download_ebirdst.py`) |
-| `data/naturalearth/` | Country and state/province boundaries (auto-downloaded) |
-| `data/ebird_hotspots_us.gpkg` | US hotspot GeoPackage for `top_spots.py` |
-| `data/sp_cache/` | Per-species packbits cache (generated at runtime) |
-| `data/score_cache/` | Precomputed score layers |
-
-- **eBird Status & Trends 2023** — Cornell Lab of Ornithology, [ebird.org/science/status-and-trends](https://ebird.org/science/status-and-trends)
-- **NaturalEarth** — country and state/province boundaries, auto-downloaded on first run
+Output goes to `results_py/<region>/<resolution>/`.
 
 ## Credits
 
-Built on [lifeR](https://github.com/smsfrn/lifeR) by **Sam Safran** — the original R implementation this tool is ported from.
-The [hydrospheric0/lifeR fork](https://github.com/hydrospheric0/lifeR) provided additional refinements used during development.
+Inspired by [lifeR](https://github.com/smsfrn/lifeR) by **Sam Safran**.
 
-## Support this project
-
-If you find this tool useful, please consider supporting its development:
+## Support
 
 <a href="https://buymeacoffee.com/bartg">
 	<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="180" />
