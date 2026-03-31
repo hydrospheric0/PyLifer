@@ -664,7 +664,7 @@ def build_sp_cache(
     np.savez_compressed(
         _cache_meta_path(region, resolution),
         version=np.bytes_(EBIRDST_VERSION),
-        threshold=np.float32(threshold),
+        threshold=np.float64(threshold),
         ref_crs_wkt=np.bytes_(ref_crs.to_wkt()),
         win_col_off=np.int32(win.col_off),
         win_row_off=np.int32(win.row_off),
